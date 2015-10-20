@@ -65,8 +65,6 @@ type
   TAllowNew = (anNo, anYes, anAsk);
 
 
-  { TfpgBaseEditCombo }
-
   TfpgBaseEditCombo = class(TfpgBaseComboBox)
   private
     FAutoCompletion: Boolean;
@@ -83,6 +81,7 @@ type
     procedure   DefaultPopupInsertFromCharmap(Sender: TObject);
     procedure   DoPaste(const AText: TfpgString);
     procedure   SetDefaultPopupMenuItemsState;
+    function    CanDrawExtraHint: Boolean;
   protected
     FDropDown: TfpgPopupWindow;
     FDrawOffset: integer;
@@ -469,6 +468,11 @@ begin
   //end;
 end;
 
+function TfpgBaseEditCombo.CanDrawExtraHint: Boolean;
+begin
+  Result := Enabled and (Text = '') and (not Focused);
+end;
+
 procedure TfpgBaseEditCombo.SetText(const AValue: string);
 var
   i: integer;
@@ -749,7 +753,7 @@ var
     else
     begin
       lcolor := clInactiveSel;
-      ltxtcolor := clText1;
+      ltxtcolor := clInactiveSelText;
     end;
 
     len := FSelOffset;
@@ -762,18 +766,14 @@ var
     tw  := Font.TextWidth(UTF8Copy(Items[FSelectedItem], 1, st));
     tw2 := Font.TextWidth(UTF8Copy(Items[FSelectedItem], 1, st + len));
 
-    // XOR on Anti-aliased text doesn't look to good. Lets try standard
-    // Blue & White like what was doen in TfpgEdit.
-   Canvas.SetColor(lcolor);
+    // Lets do the same as what was done in TfpgEdit.
+    Canvas.SetColor(lcolor);
     Canvas.FillRectangle(-FDrawOffset + FMargin + tw, 3, tw2 - tw, Font.Height);
     r.SetRect(-FDrawOffset + FMargin + tw, 3, tw2 - tw, Font.Height);
     Canvas.AddClipRect(r);
     Canvas.SetTextColor(ltxtcolor);
     fpgStyle.DrawString(Canvas, -FDrawOffset + FMargin + tw, 3, UTF8Copy(Items[FSelectedItem], Succ(st), Pred(len)), Enabled);
     Canvas.ClearClipRect;
-
-    //Canvas.XORFillRectangle(fpgColorToRGB(lcolor) xor $FFFFFF,
-    //  -FDrawOffset + FMargin + tw, 3, tw2 - tw, Font.Height);
   end;
 
 begin
@@ -829,13 +829,14 @@ begin
   end;
   Canvas.FillRectangle(r);
 
+  if CanDrawExtraHint then
+    DrawPlaceholderText(fpgRect(r.Left+FMargin+1, FMargin, r.Width-FMargin-1, r.Height-FMargin));
+
   // Draw select item's text
   if not AutoCompletion then
   begin
     if HasText then
-      fpgStyle.DrawString(Canvas, FMargin+1, FMargin, Text, Enabled)
-    else
-      DrawPlaceholderText(fpgRect(r.Left+FMargin+1, FMargin, r.Width-FMargin-1, r.Height-FMargin));
+      fpgStyle.DrawString(Canvas, FMargin+1, FMargin, Text, Enabled);
   end
   else
   begin

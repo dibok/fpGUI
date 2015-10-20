@@ -44,6 +44,8 @@ type
   TfpgTextEditOption = (eo_ExtraHintIfFocus);
   TfpgTextEditOptions = set of TfpgTextEditOption;
 
+  { TfpgBaseEdit }
+
   TfpgBaseEdit = class(TfpgWidget)
   private
     FAutoSelect: Boolean;
@@ -66,6 +68,7 @@ type
     procedure   DeleteSelection;
     procedure   DoCopy;
     procedure   DoPaste(const AText: TfpgString);
+    procedure   PaintDragPreview(ASender: TfpgDrag; ACanvas: TfpgCanvas);
     procedure   SetAutoSelect(const AValue: Boolean);
     procedure   SetBorderStyle(const AValue: TfpgEditBorderStyle);
     procedure   SetHideSelection(const AValue: Boolean);
@@ -79,6 +82,7 @@ type
     procedure   DefaultPopupCopy(Sender: TObject);
     procedure   DefaultPopupPaste(Sender: TObject);
     procedure   DefaultPopupClearAll(Sender: TObject);
+    procedure   DefaultPopupSelectAll(Sender: TObject);
     procedure   DefaultPopupInsertFromCharmap(Sender: TObject);
     procedure   SetDefaultPopupMenuItemsState;
     procedure   SetReadOnly(const AValue: Boolean);
@@ -88,6 +92,8 @@ type
     FSideMargin: integer;
     FHeightMargin: integer;
     FMouseDragPos: integer;
+    FDNDMaybe: Boolean;
+    FDNDForSure: Boolean;
     FSelStart: integer;
     FSelOffset: integer;
     FCursorPos: integer; // Caret position (characters)
@@ -100,12 +106,14 @@ type
     function    GetMarginAdjustment: integer; virtual;
     procedure   DrawSelection; virtual;
     procedure   DoOnChange; virtual;
+    procedure   DoDragStartDetected; override;
     procedure   ShowDefaultPopupMenu(const x, y: integer; const shiftstate: TShiftState); virtual;
     procedure   HandlePaint; override;
     procedure   HandleResize(awidth, aheight: TfpgCoord); override;
     procedure   HandleKeyChar(var AText: TfpgChar; var shiftstate: TShiftState; var consumed: Boolean); override;
     procedure   HandleKeyPress(var keycode: word; var shiftstate: TShiftState; var consumed: Boolean); override;
     procedure   HandleLMouseDown(x, y: integer; shiftstate: TShiftState); override;
+    procedure   HandleLMouseUp(x, y: integer; shiftstate: TShiftState); override;
     procedure   HandleRMouseUp(x, y: integer; shiftstate: TShiftState); override;
     procedure   HandleMouseMove(x, y: integer; btnstate: word; shiftstate: TShiftState); override;
     procedure   HandleDoubleClick(x, y: integer; button: word; shiftstate: TShiftState); override;
@@ -424,6 +432,7 @@ const
   ipmPaste      = 'miDefaultPaste';
   ipmClearAll   = 'miDefaultClearAll';
   ipmCharmap    = 'miDefaultCharmap';
+  ipmSelectAll  = 'miDefaultSelectAll';
 
   cPasswordChar = #$E2#$97#$8F;    // U+25CF BLACK CIRCLE
 
@@ -490,6 +499,12 @@ end;
 
 
 { TfpgBaseEdit }
+
+procedure TfpgBaseEdit.PaintDragPreview(ASender: TfpgDrag; ACanvas: TfpgCanvas);
+begin
+  ACanvas.Clear(BackgroundColor);
+  ACanvas.DrawString(0,0, ASender.MimeData.Text);
+end;
 
 procedure TfpgBaseEdit.Adjust(UsePxCursorPos: boolean = false);
 begin
@@ -715,14 +730,13 @@ begin
   else
   begin
     lcolor := clInactiveSel;
-    Canvas.SetTextColor(clText1);
+    Canvas.SetTextColor(clInactiveSelText);
   end;
 
   rs.SetRect(FVisSelStartPx, r.Top + FHeightMargin, FVisSelEndPx - FVisSelStartPx, FFont.Height);
   Canvas.SetColor(lcolor);
   Canvas.FillRectangle(rs);
-  Canvas.SetTextColor(clWhite);
-  Canvas.AddClipRect(rs);
+  Canvas.SetClipRect(rs);
   fpgStyle.DrawString(Canvas, -FDrawOffset + GetMarginAdjustment, r.Top + FHeightMargin, FVisibleText, Enabled);
   Canvas.ClearClipRect;
 end;
@@ -842,6 +856,16 @@ begin
     Consumed := False;
   end;
 
+  // select all
+  if not Consumed then
+  begin
+    if (keycode = 65 { letter A }) and (shiftstate = [ssCtrl]) then
+    begin
+      SelectAll;
+      Consumed := True;
+    end;
+  end;
+
   if not Consumed then
   begin
     // checking for movement keys:
@@ -952,8 +976,13 @@ begin
 end;
 
 procedure TfpgBaseEdit.HandleLMouseDown(x, y: integer; shiftstate: TShiftState);
+var
+  sstart,
+  send: Integer;
+  wasfocused: Boolean;
 begin
   fpgApplication.HideHint;
+  wasfocused:=Focused;
   inherited HandleLMouseDown(x, y, shiftstate);
 
   FCursorPx := x;
@@ -963,10 +992,38 @@ begin
     FSelOffset := FCursorPos - FSelStart
   else
   begin
-    FSelStart  := FCursorPos;
-    FSelOffset := 0;
+
+    if FSelOffset < 0 then
+      sstart:=FSelStart-FSelOffset
+    else
+      sstart:=FSelStart;
+    send := sstart + (+FSelOffset);
+
+
+    if wasfocused and (FSelOffset <> 0) and (FMouseDragPos in [sstart..send]) then
+    begin
+      // Mouse is down inside selected text
+      FDNDMaybe := True
+    end
+    else
+    begin
+      // mouse is down outside selected text
+      FSelStart  := FCursorPos;
+      FSelOffset := 0;
+    end;
   end;
   AdjustDrawingInfo;
+  RePaint;
+end;
+
+procedure TfpgBaseEdit.HandleLMouseUp(x, y: integer; shiftstate: TShiftState);
+begin
+  inherited HandleLMouseUp(x, y, shiftstate);
+
+  if FDNDMaybe and not FDNDForSure then
+    FSelOffset:=0;
+  FDNDMaybe:=False;
+  FDNDForSure:=False;
   RePaint;
 end;
 
@@ -989,14 +1046,17 @@ begin
     Exit; //==>
   end;
 
-  cp := FCursorPos;
-  FCursorPx := x;
-  AdjustTextOffset(True);
-  if FCursorPos <> cp then
+  if not FDNDMaybe then
   begin
-    FSelOffset := FCursorPos - FSelStart;
-    AdjustDrawingInfo;
-    Repaint;
+    cp := FCursorPos;
+    FCursorPx := x;
+    AdjustTextOffset(True);
+    if FCursorPos <> cp then
+    begin
+      FSelOffset := FCursorPos - FSelStart;
+      AdjustDrawingInfo;
+      Repaint;
+    end;
   end;
 end;
 
@@ -1029,7 +1089,7 @@ end;
 procedure TfpgBaseEdit.HandleSetFocus;
 begin
   inherited HandleSetFocus;
-  if AutoSelect then
+  if AutoSelect and (FText <> '') then
     SelectAll;
 end;
 
@@ -1242,6 +1302,11 @@ begin
   Clear;
 end;
 
+procedure TfpgBaseEdit.DefaultPopupSelectAll(Sender: TObject);
+begin
+  SelectAll;
+end;
+
 procedure TfpgBaseEdit.DefaultPopupInsertFromCharmap(Sender: TObject);
 var
   s: TfpgString;
@@ -1272,6 +1337,8 @@ begin
         itm.Enabled := (not ReadOnly) and (fpgClipboard.Text <> '')
       else if itm.Name = ipmClearAll then
         itm.Enabled := (not ReadOnly) and (Text <> '')
+      else if itm.Name = ipmSelectAll then
+        itm.Enabled := Text <> ''
       else if itm.Name = ipmCharmap then
         itm.Enabled := (not ReadOnly);
     end;
@@ -1311,6 +1378,31 @@ begin
     FOnChange(self);
 end;
 
+procedure TfpgBaseEdit.DoDragStartDetected;
+var
+  Drag: TfpgDrag;
+begin
+  if Assigned(OnDragStartDetected) then
+    inherited DoDragStartDetected
+  else
+  begin
+    if FDNDMaybe then
+    begin
+      // it's safe to modify FDragStartPos now since it's used to detect for DoDragStartDetected
+      // FDragStartPos is used to set the position of the preview window from the mouse cursor
+      FDragStartPos := fpgPoint(-10,0);
+      FDNDForSure:=True;
+      Drag := TfpgDrag.Create(Self);
+      Drag.MimeData := TfpgMimeData.Create;
+      Drag.MimeData.Text:=SelectionText;
+      Drag.PreviewSize := fpgSize(Canvas.Font.TextWidth(Drag.MimeData.Text), Canvas.Font.Height);
+      Drag.OnPaintPreview:=@PaintDragPreview;
+
+      Drag.Execute([daCopy]);
+    end;
+  end;
+end;
+
 procedure TfpgBaseEdit.ShowDefaultPopupMenu(const x, y: integer;
   const shiftstate: TShiftState);
 var
@@ -1319,16 +1411,18 @@ begin
   if not Assigned(FDefaultPopupMenu) then
   begin
     FDefaultPopupMenu := TfpgPopupMenu.Create(nil);
-    itm := FDefaultPopupMenu.AddMenuItem(rsCut, '', @DefaultPopupCut);
+    itm := FDefaultPopupMenu.AddMenuItem(rsCut, rsKeyCtrl+'X', @DefaultPopupCut);
     itm.Name := ipmCut;
-    itm := FDefaultPopupMenu.AddMenuItem(rsCopy, '', @DefaultPopupCopy);
+    itm := FDefaultPopupMenu.AddMenuItem(rsCopy, rsKeyCtrl+'C', @DefaultPopupCopy);
     itm.Name := ipmCopy;
-    itm := FDefaultPopupMenu.AddMenuItem(rsPaste, '', @DefaultPopupPaste);
+    itm := FDefaultPopupMenu.AddMenuItem(rsPaste, rsKeyCtrl+'V', @DefaultPopupPaste);
     itm.Name := ipmPaste;
     itm := FDefaultPopupMenu.AddMenuItem(rsDelete, '', @DefaultPopupClearAll);
     itm.Name := ipmClearAll;
     itm := FDefaultPopupMenu.AddMenuItem('-', '', nil);
     itm.Name := 'N1';
+    itm := FDefaultPopupMenu.AddMenuItem(rsSelectAll, rsKeyCtrl+'A', @DefaultPopupSelectAll);
+    itm.Name := ipmSelectAll;
     itm := FDefaultPopupMenu.AddMenuItem(rsInsertFromCharacterMap, '', @DefaultPopupInsertFromCharmap);
     itm.Name := ipmCharmap;
   end;
